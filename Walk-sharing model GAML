@@ -1,0 +1,841 @@
+/***
+* Name: parkvillewalkshare
+* Author: dbhowmick
+* Description: 
+* Tags: 
+***/
+
+model parkvillewalkshare_dynamic
+
+global {
+	file edges_shapefile <- shape_file("C:/Users/dbhowmick/Documents/Unimelb/Papers Articles and more/walk-sharing/data/melbourne_university_parkville_proj/edges/edges.shp");
+	file nodes_shapefile <- shape_file("C:/Users/dbhowmick/Documents/Unimelb/Papers Articles and more/walk-sharing/data/melbourne_university_parkville_proj/nodes/nodes.shp");	
+//	file stops_shapefile <- shape_file("C:/Users/dbhowmick/Documents/Unimelb/Datasets/Campus_exit_building_staff_student_2019/mygeodata2/ptstops_routeinfo_trial.shp");
+	file stops_csv <- csv_file("C:/Users/dbhowmick/Documents/Unimelb/Datasets/Campus_exit_building_staff_student_2019/ptstops_proj2.csv",";",true);
+	
+	int doy <- 101; //33,101,325
+	int hour <- 18;
+	int rnd_seed <- 5;
+	
+//	file population_input <- csv_file("../includes/new_input/GAMA_input_doy"+doy+"_seed7.csv",";",true);
+//	file population_input <- csv_file("../includes/new_input_acceptancerate/GAMA_input_doy"+doy+"_hour"+hour+"_seed1_new.csv",";",true);
+	file population_input <- csv_file("../includes/new_input_acceptancerate/GAMA_input_doy"+doy+"_hour"+hour+"_seed"+rnd_seed+"_new.csv",";",true);
+	
+	geometry shape <- envelope(edges_shapefile);
+	graph the_graph;
+	
+	int flag_write <- 0;
+	int end_cycle <- 360;
+//	int end_cycle <- 4500;
+	
+	//matrix mat_population <- matrix(population_input); //convert to matrix to get number of rows in the csv file = nbpeople
+	//int nbpeople <- mat_population.rows;
+	int nbpeople_init <- matrix(population_input).rows;
+	int nbpeople <- nbpeople_init;
+	float mean_speed <- 4.25 #km/#h; //speed reference (Transport Modelling Guidelines (Volume 4) - VicRoads, page 146)
+	float stdev_speed <- 1.0 #km/#h;
+//	int min_walk_start <- 1;
+//	int max_walk_start <- 16;
+	
+	float mean_waiting_time <- 6#mn;
+	float stdev_waiting_time <- 4#mn;
+	int min_max_waiting_time_fearful <- 15#mn;
+	int max_max_waiting_time_fearful <- 20#mn;
+	
+	int min_max_waiting_time <- 1#mn;
+	int max_max_waiting_time <- 20#mn;
+	int min_max_waiting_time_2 <- 5#mn;
+	int max_max_waiting_time_2 <- 20#mn;	
+//	int max_waiting_time_global <- 10#mn;
+	
+	float distance_threshold <- 700.0; //700.0
+	
+//	float mean_ptstop_search_distance <- 500.0;
+//	float stdev_ptstop_search_distance <- 100.0;
+	float ptstop_search_distance <- 700.0;
+	
+	float tram_choiceprob <- 0.8;
+	
+	float male_to_total_ratio <- 0.5;
+	float same_gender_only_acceptance_prob_male <- 0.1;
+	float same_gender_only_acceptance_prob_female <- 0.5;
+	
+	float employment_ratio <- 1.0; //employed agents by total agents
+	
+	float fear_factor <- 0.3;
+	
+	float step <- 20 #second;
+	int current_min update: (time / 60);	
+	
+	init {
+		create road from: edges_shapefile ;
+		map<road, float> weights_map <- road as_map (each:: each.shape.perimeter);
+		the_graph <- as_edge_graph(road) with_weights weights_map;
+		create nodepoints from: nodes_shapefile;
+		
+		create people from: population_input with: 
+			[	
+				name::string(get("name")), 
+//				assigned_buddy::string(get("assigned_buddy")),
+				location::point(get("loc_orig")),//(get("loc_orig")),
+				location_init::point(get("loc_orig")),
+//				speed::float(get("speed")), 
+				start_walk::int(get("start_walk"))
+//				modified_start_walk::int(get("modified_start_walk")),
+//				the_target::point(get("loc_dest"))	
+			];
+			
+		create stopscsv from: stops_csv with:
+			[
+				osmid::string(get("osmid")),
+				type::string(get("highway")),
+				routes::list<int>(get("ref")), //remove '[', ']' and ', ' (comma followed by SPACE) by ' ' in NOTEPAD++, so that those are not read as characters or 0 by GAMA
+				type_index::int(get("stop_type_index")),
+				location::point(get("loc")),
+				location_init::point(get("loc"))			
+			];
+			
+
+		write(sample(matrix(population_input).rows));
+		write(sample(length(matrix(population_input))));
+		write sample(stopscsv.attributes);
+		write(list(stopscsv collect each.type));
+		write(list(stopscsv collect each.type_index));
+		write(list(stopscsv collect each.location));
+	}
+	
+	
+	reflex info_time {
+		write "\n-------------------------------------------";
+		write "cycle: " + cycle;
+		write "time: " + time;
+		write "current_min: " + current_min;
+		write "number of agents left: " + nbpeople;	
+		
+		if cycle = 0 {
+			write "agents left: ";
+			write "All";
+		}
+		
+	}
+	
+//	list matched_agents_check;
+//	list matched_agents;
+//	list matched_agents_indices;
+
+	
+	reflex match when: nbpeople > 0 {
+		list match_pool <- [];
+		int count_match_pool ;
+		ask people {
+			if flag_active = 1 {
+				add name to: match_pool;
+			}
+		}
+		count_match_pool <-  length(match_pool);
+		write(sample(match_pool));
+		write(sample(count_match_pool));
+		int i;
+		
+		if count_match_pool > 1 {
+			matrix dist_matrix <- 0.0 as_matrix({count_match_pool,count_match_pool}); 
+			matrix index_matrix <- list as_matrix({count_match_pool,count_match_pool}); 
+			loop i from: 0 to: count_match_pool-1 {
+				list dist_list <- [];
+				string ped_name <- match_pool[i];
+//				write " Agent: " + ped_name;
+				int ped_index <- list(people collect each.name) index_of ped_name;
+//				write " ped_index: " + ped_index;
+				point ped_loc_orig <- people[ped_index]['location'];
+//				point ped_loc_dest <- people[ped_index]['the_target'];
+				point ped_loc_dest <- people[ped_index]['pt_destination'];
+				int gender_i <- people[ped_index]['gender'];
+				int gender_pref_i <- people[ped_index]['gender_pref'];
+				loop j from: 0 to: count_match_pool-1 {
+					string ped_j_name <- match_pool[j];
+					int ped_j_index <- list(people collect each.name) index_of ped_j_name;
+					point ped_j_loc_orig <- people[ped_j_index]['location'];
+//					point ped_j_loc_dest <- people[ped_j_index]['the_target'];
+					point ped_j_loc_dest <- people[ped_j_index]['pt_destination'];
+					int gender_j <- people[ped_j_index]['gender'];
+					int gender_pref_j <- people[ped_j_index]['gender_pref'];
+					if gender_i = gender_j { //IF GENDER SAME, THEN PREFERENCE DOES NOT MATTER FOR MATCHING
+						//float dist_orig <- people[ped_index] distance_to people[ped_j_index];
+						float dist_orig <- sqrt((float(ped_loc_orig.x) - float(ped_j_loc_orig.x))^2 + (float(ped_loc_orig.y) - float(ped_j_loc_orig.y))^2);
+						float dist_dest <- sqrt((float(ped_loc_dest.x) - float(ped_j_loc_dest.x))^2 + (float(ped_loc_dest.y) - float(ped_j_loc_dest.y))^2);
+						float dist <- sqrt((dist_orig)^2 + (dist_dest)^2);
+						list index_list <- [ped_index, ped_j_index];
+						put index_list at: {i,j} in: index_matrix;
+						put dist at: {i,j} in: dist_matrix;
+					}
+					else { // IF GENDER DIFF, THEN IF ONE PED PREFERS SAME GENDER, MATCHING NOT POSSIBLE, HENCE ENTER HIGH DISTANCE VALUE IN DISTANCE MATRIX
+						if gender_pref_i = 0 or gender_pref_j = 0 {
+							float dist <- 100000.0;
+							list index_list <- [ped_index, ped_j_index];
+							put index_list at: {i,j} in: index_matrix;
+							put dist at: {i,j} in: dist_matrix;
+						}
+						else {
+							float dist_orig <- sqrt((float(ped_loc_orig.x) - float(ped_j_loc_orig.x))^2 + (float(ped_loc_orig.y) - float(ped_j_loc_orig.y))^2);
+							float dist_dest <- sqrt((float(ped_loc_dest.x) - float(ped_j_loc_dest.x))^2 + (float(ped_loc_dest.y) - float(ped_j_loc_dest.y))^2);
+							float dist <- sqrt((dist_orig)^2 + (dist_dest)^2);
+							list index_list <- [ped_index, ped_j_index];
+							put index_list at: {i,j} in: index_matrix;
+							put dist at: {i,j} in: dist_matrix;
+						}
+					}
+
+				}		
+			}
+//			write(sample(index_matrix));	
+//			write(sample(dist_matrix));	
+			float min_dist <- min (dist_matrix);
+			point min_dist_index <- dist_matrix index_of min_dist;
+//			write(sample(min_dist));
+//			write(sample(min_dist_index));
+			
+			//replace diagonal elements and elements above the diagonal with large positive values
+			loop i from: 0 to: count_match_pool-1 {
+				loop j from: 0 to: count_match_pool-1 {
+					if i >= j {
+						dist_matrix[i,j] <- 100000.0; //replace by a very large value
+					}
+				}
+			}
+//			write(sample(dist_matrix));
+			
+			//get a list of viable matches and their locations in the dist_matrix
+			//use the same locations to get the indices of agents with min distance from the index_matrix
+			list viable_matches_zerodistance <- dist_matrix sort_by each where (each = 0.0);
+			list viable_matches <- dist_matrix sort_by each where (each < distance_threshold and each >0.0);
+			write(sample(viable_matches_zerodistance));
+			write(sample(length(viable_matches_zerodistance)));
+			write(sample(viable_matches));
+			write(sample(length(viable_matches)));
+			list matched_agents_check;
+			list matched_agents;
+			list matched_agents_indices;
+			
+			loop index_row from: 0 to: dist_matrix.rows - 1 {
+				loop index_column from: 0 to: dist_matrix.columns - 1 {
+					if dist_matrix[index_row, index_column] =  0.0 {
+//						write(sample(index_row));
+//						write(sample(index_column));
+						list min_dist_agent_indices_k <- index_matrix[index_row, index_column];
+						write(sample(min_dist_agent_indices_k));
+						int t0 <- min_dist_agent_indices_k[0];
+						int t1 <- min_dist_agent_indices_k[1];
+						bool skip <- matched_agents_check contains_any [people[t0]['name'],people[t1]['name']];
+//						write(sample(skip));
+						if skip = false { //check for agents already matched
+							write "New agents zero distance: ";
+							list buddies;
+							list buddy_indices;
+							people[t0]['assigned_buddy'] <- people[t1]['name']; // assign buddies
+							people[t1]['assigned_buddy'] <- people[t0]['name']; // assign buddies
+							add t0 to: buddy_indices;
+							add t1 to: buddy_indices;
+							add people[t0]['name'] to: buddies; // add to list of agents already matched
+							add people[t1]['name'] to: buddies;	// add to list of agents already matched
+							add buddies to: matched_agents;
+							add buddy_indices to: matched_agents_indices;
+							add people[t0]['name'] to: matched_agents_check; // for simplified checking 
+							add people[t1]['name'] to: matched_agents_check;
+						}
+					}
+				}
+			}
+			
+			write(sample(matched_agents));
+			if length(viable_matches) > 0 {
+				loop k from: 0 to: length(viable_matches) - 1 {				
+	//				write "";
+					point min_dist_index_k <- dist_matrix index_of viable_matches[k];
+	//				write(sample(min_dist_index_k));
+					list min_dist_agent_indices_k <- index_matrix[min_dist_index_k];
+//					list min_dist_agent_indices_k <- index_matrix[min_dist_index_k.x, min_dist_index_k.y];
+	//				write(sample(min_dist_agent_indices_k));
+					int t0 <- min_dist_agent_indices_k[0];
+					int t1 <- min_dist_agent_indices_k[1];
+					bool skip <- matched_agents_check contains_any [people[t0]['name'],people[t1]['name']];
+	//				write(sample(skip));
+					if skip = false { //check for agents already matched
+						write "New agents: ";
+						list buddies;
+						list buddy_indices;
+						people[t0]['assigned_buddy'] <- people[t1]['name']; // assign buddies
+						people[t1]['assigned_buddy'] <- people[t0]['name']; // assign buddies
+						add t0 to: buddy_indices;
+						add t1 to: buddy_indices;
+						add people[t0]['name'] to: buddies; // add to list of agents already matched
+						add people[t1]['name'] to: buddies;	// add to list of agents already matched
+						add buddies to: matched_agents;
+						add buddy_indices to: matched_agents_indices;
+						add people[t0]['name'] to: matched_agents_check; // for simplified checking 
+						add people[t1]['name'] to: matched_agents_check;
+					}
+//				write(sample(matched_agents));
+//				write(sample(matched_agents_indices));	
+//				write(sample(matched_agents_check));	
+				}
+			}
+
+			write(sample(matched_agents));
+			
+			//calculate common speed, waiting time, meeting location
+			if length(matched_agents) > 0 {
+				loop i from: 0 to: length(matched_agents)-1 {
+					list ped_indices <- matched_agents_indices at i;
+					int ped1_index <- ped_indices at 0;
+					int ped2_index <- ped_indices at 1;
+					write(sample(ped1_index));
+					write(sample(ped2_index));
+					
+					people[ped1_index]['flag_active'] <- 0; //newly included 01.10.2020
+					people[ped2_index]['flag_active'] <- 0; //newly included 01.10.2020
+					
+					people[ped1_index]['buddy_gender'] <- people[ped2_index]['gender'];
+					people[ped2_index]['buddy_gender'] <- people[ped1_index]['gender'];
+					
+					people[ped1_index]['flag_matched'] <- 1;
+					people[ped2_index]['flag_matched'] <- 1;
+					
+					int common_walk_start <- max(people[ped1_index]['start_walk'], people[ped2_index]['start_walk']); // find latter start time
+					people[ped1_index]['modified_start_walk'] <- common_walk_start;
+					people[ped2_index]['modified_start_walk'] <- common_walk_start;
+					
+					point ped1_location <- people[ped1_index]['location'];
+					write sample(ped1_location);
+					point ped2_location <- people[ped2_index]['location'];
+					write sample(ped2_location);
+					
+					point ped1_dest <- people[ped1_index]['pt_destination'];
+					write sample(ped1_dest);
+					point ped2_dest <- people[ped2_index]['pt_destination'];
+					write sample(ped2_dest);
+					
+					if ped1_dest = ped2_dest {
+						people[ped1_index]['flag_diffdest'] <- 0;
+						people[ped2_index]['flag_diffdest'] <- 0;
+						people[ped1_index]['separation_point'] <- ped1_dest;
+						people[ped2_index]['separation_point'] <- ped2_dest;
+					}
+					else {
+						people[ped1_index]['flag_diffdest'] <- 1;
+						people[ped2_index]['flag_diffdest'] <- 1;
+						path shortest_path_between_destinations <- path_between (the_graph, ped1_dest, ped2_dest);
+						list<geometry> check_segments_2 <- shortest_path_between_destinations.segments;
+						float shortest_path_length_between_destinations <- shortest_path_between_destinations.shape.perimeter;
+						float dist_from_seppoint <- 0.0;
+						point separation_point;
+						loop line over: check_segments_2 {
+							dist_from_seppoint <- dist_from_seppoint + line.perimeter;
+							if dist_from_seppoint >= 0.5 * shortest_path_length_between_destinations {
+								separation_point <- line;
+								break;
+							}
+						}
+						people[ped1_index]['separation_point'] <- separation_point;
+						people[ped2_index]['separation_point'] <- separation_point;
+					}
+					
+					if ped1_location = ped2_location {
+						float shortest_path_length_to_buddy<- 0.0;
+						write sample(shortest_path_length_to_buddy);
+						point meeting_point <- ped1_location;
+						write sample(meeting_point);
+						float dist_to_meetingpoint <- 0.0;
+					} 
+					else {
+						path shortest_path_to_buddy <- path_between (the_graph, ped1_location, ped2_location);
+//						write sample(shortest_path_to_buddy);
+						people[ped1_index]['shortest_path_to_buddy'] <- shortest_path_to_buddy;
+						people[ped2_index]['shortest_path_to_buddy'] <- shortest_path_to_buddy;
+						
+//						geometry shortest_path_to_buddy_shape <- shortest_path_to_buddy.shape;
+		//				write sample(shortest_path_to_buddy_shape);
+//						people[ped1_index]['shortest_path_to_buddy_shape'] <- shortest_path_to_buddy_shape;
+//						people[ped2_index]['shortest_path_to_buddy_shape'] <- shortest_path_to_buddy_shape;
+						
+						list<geometry> check_segments <- shortest_path_to_buddy.segments;
+						write sample(check_segments);
+		//				write sample(length(check_segments));
+						people[ped1_index]['check_segments'] <- check_segments;
+						people[ped2_index]['check_segments'] <- check_segments;					
+						
+						float shortest_path_length_to_buddy <- shortest_path_to_buddy.shape.perimeter;
+						write sample(shortest_path_length_to_buddy);
+						people[ped1_index]['shortest_path_length_to_buddy'] <- shortest_path_length_to_buddy;
+						people[ped2_index]['shortest_path_length_to_buddy'] <- shortest_path_length_to_buddy;
+						
+						float dist_to_meetingpoint <- 0.0; // deducing meeting point of buddies and their distance to it					
+						point meeting_point;
+						loop line over: check_segments {
+//							write sample(line);
+//							write sample(line.perimeter);
+							dist_to_meetingpoint <- dist_to_meetingpoint + line.perimeter;
+							if dist_to_meetingpoint >= 0.5 * shortest_path_length_to_buddy {
+								meeting_point <- line;
+								break;
+							}
+						}
+						write sample(meeting_point);
+						people[ped1_index]['meeting_point'] <- meeting_point;
+						people[ped2_index]['meeting_point'] <- meeting_point;	
+						path shortest_path_to_meetingpt_ped1 <- path_between (the_graph, ped1_location, meeting_point);	//newly included 01.10.2020
+						path shortest_path_to_meetingpt_ped2 <- path_between (the_graph, ped2_location, meeting_point);	//newly included 01.10.2020
+						people[ped1_index]['dist_to_meetingpoint'] <- shortest_path_to_meetingpt_ped1.shape.perimeter; 	//newly included 01.10.2020	
+						people[ped2_index]['dist_to_meetingpoint'] <- shortest_path_to_meetingpt_ped2.shape.perimeter;	//newly included 01.10.2020
+//						people[ped1_index]['dist_to_meetingpoint'] <- dist_to_meetingpoint;
+//						people[ped2_index]['dist_to_meetingpoint'] <- shortest_path_length_to_buddy - dist_to_meetingpoint;
+					}
+						
+					float ped1_speed <- people[ped1_index]['speed'];
+					float ped2_speed <- people[ped2_index]['speed'];
+					float common_speed <- min(ped1_speed, ped2_speed); // find slower walking speed, assign to both
+					people[ped1_index]['speed'] <- common_speed;
+					people[ped2_index]['speed'] <- common_speed;
+	//				write(sample(common_speed));
+				}
+			}
+		}		
+	}
+	
+	reflex write_to_csv  when: nbpeople = 0 and flag_write = 0 {
+
+		flag_write <- 1;
+		write "\n-------------------------------------------";
+		write "\n-------------------------------------------";	
+		write "End of simulation";	
+		//save people to: "../models/results_performance_parkville/result_doy"+doy+"_seed7.csv" type:"csv" rewrite: true;
+//		save people to: "../models/results_practical_viability/result_doy"+doy+"_hour_"+hour+"_seed1.csv" type:"csv" rewrite: true;	
+		save people to: "../models/results_practical_viability/result_doy"+doy+"_hour_"+hour+"_seed"+rnd_seed+".csv" type:"csv" rewrite: true;	
+//		save people to: "../models/results_safetyindex_parkville/result_doy"+doy+"_hour_"+hour+"_seed"+rnd_seed+".csv" type:"csv" rewrite: true;
+//		save people to: "../models/results_safetyindex_parkville/result_doy"+doy+"_hour"+hour+"_buddydist"+distance_threshold+".csv" type:"csv" rewrite: true;
+		
+//		write "Output file saved";
+	}
+	
+	reflex end_simulation when: cycle >= end_cycle { //providing sufficient time to complete other batches for batch simulation
+		
+		if flag_write = 1 {
+			write "END OF ALL BATCHES";
+			do pause;
+		}
+		else{
+			end_cycle <- cycle + 21; //allowing some more time for completion
+		}
+
+	}
+	
+//	reflex end_simulation  when: nbpeople = 0 {
+//		do pause;
+//	}
+}
+
+
+species road  {
+//	float weight;
+//	float length;
+	rgb color <- #grey ;
+	aspect base {
+		draw shape color: color ;
+	}
+}
+
+species nodepoints {
+	aspect geom {
+		if location = {2462.4514550729655,2792.5352068226784}{
+//		if self.location = any_location_in(one_of(the_target)){	
+			draw square(20) color: #blue border: #black;
+		}
+		else{
+			draw circle(2) color: #red border: #black;	
+		}		
+	}
+}
+
+
+species stopscsv {
+	string osmid;
+	string type;
+	list routes;
+	point location;
+	point location_init;
+	int flag_mapmatched <- 0;
+	int type_index;
+	
+	reflex mapmatch when: flag_mapmatched = 0 {
+		agent<nodepoints> closest_node <- agent_closest_to(self);
+		location <- closest_node.location;		
+		flag_mapmatched <- 1;
+	}
+	
+	aspect geom {
+		if type = 'bus_stop' {
+			draw square(20) color: #orange;
+		}
+		else if type = 'tram_stop' {
+			draw square(20) color: #green;
+		}
+		else {
+			draw square(20) color: #blue;
+		}
+			
+	}
+}
+
+
+species people skills:[moving] {
+	
+	int gender <- rnd_choice([male_to_total_ratio,(1-male_to_total_ratio)]); // 0 for male, 1 for female
+	int gender_pref;
+	//int diff_gender_acceptance <- rnd_choice([(1-diff_gender_acceptance_prob),diff_gender_acceptance_prob]); // 0 for non-acceptance of offer, 1 for acceptance of offer
+	
+	int employment_status <- rnd_choice([employment_ratio,(1-employment_ratio)]); // 0 for employed, 1 for unemployed/student
+	
+	int fearfulness <- rnd_choice([fear_factor,(1-fear_factor)]); // 0 for more fearful, 1 for less fearful
+	
+	geometry my_path;
+	geometry my_path_2;
+	geometry my_path_3;
+	geometry my_path_4;
+//	point location <- any_location_in(one_of(dest));
+	point location;
+	point location_init;
+	point the_target;
+//	point the_target <- {653.2782037183642,2391.470574390143,0.0}; // common destination shopping centre
+
+	float r1 <- rnd (0.0,1.0);
+	float z1 <- normal_inverse(r1,mean_speed,stdev_speed) with_precision(2);
+	float speed <- mean_speed + z1*stdev_speed;
+	
+//	float r2 <- rnd (0.0,1.0);
+//	float z2 <- normal_inverse(r2,mean_waiting_time,stdev_waiting_time) with_precision(2);
+//	int max_waiting_time <- mean_waiting_time + z1*stdev_waiting_time;
+
+	
+	float total_dist <- 0.0 ;	
+	float dist_alone <- 0.0 ;	
+	float dist_towards_buddy <- 0.0 ;
+	float dist_with_buddy <- 0.0 ;
+	float dist_after_separation <- 0.0 ;
+	
+	string travelmode_detailed; // existing travel mode
+	
+	int start_walk ;
+	int end_walk;
+	int walk_duration;
+	list<geometry> segments; 
+	list<point> pts; 
+	int flag <-1;
+	int flag_reached <- 0; //changes to 1 when agent reaches destination
+	int flag_reached_seppoint <- 0; //changes to 1 when agent reaches seppoint
+	list nearby_agents; // retrieves the nearby agents calculated in reflex info time at cycle 1
+	list mod_nearby_agents; // modified number of nearby agents during matching
+	string assigned_buddy; // retrieves the assigned walking buddy
+	int modified_start_walk; // modified starting time of walk
+	
+	//WAITING TIME THRESHOLD
+	int actual_waiting_time <- 0; // waiting time for the agent for matching
+//	int max_waiting_time <- (max_waiting_time_global/60);
+//	int max_waiting_time <- rnd (min_max_waiting_time/60,max_max_waiting_time/60); // maximum time (in minutes) for which the agent will wait before giving up
+	int max_waiting_time;
+	
+	//DISTANCE TO DESTINATION SEARCH THRESHOLD
+//	float r2 <- rnd (0.0,1.0);
+//	float z2 <- normal_inverse(r2,mean_ptstop_search_distance,stdev_ptstop_search_distance) with_precision(2);
+//	float ptstop_search_distance <- mean_ptstop_search_distance + z2*stdev_ptstop_search_distance;
+	
+	path shortest_path_to_buddy; // shortest path to buddy's start location
+	geometry shortest_path_to_buddy_shape;
+	float shortest_path_length_to_buddy; // shortest path length to buddy's start location
+	point meeting_point; // meeting point of assigned buddies
+	float dist_to_meetingpoint; // shortest path to meeting point
+	point separation_point; //separation point if destinations are not the same
+	float dist_from_seppoint; //shortest path from meeting point to destination
+	
+	path the_path_to_meetingpoint; 
+	path the_path_together;
+	path the_path;
+	path the_path_after_separation;
+	
+//	float real_speed;
+	road current_road;
+//	map<road, float> roads_knowledge;
+
+	int flag_active <- 0;
+	int flag_matched <- 0;
+	int flag_give_up <- 0;
+	int flag_diffdest <- 0;
+	list<people> neighbour_agents;
+	list active_users;
+
+//	path shortest_path <- path_between (the_graph, location, the_target);
+	path shortest_path;
+	float shortest_path_length;
+	
+	geometry search_area <- circle(ptstop_search_distance,location);
+	list var0;
+	list var1;
+	bool start_walk_share;
+	bool still_together; 
+	int trigger_walk;
+	
+	list<stopscsv> nearby_stops;
+	int no_of_nearby_stops;
+	agent<stopscsv> mystop;
+	point pt_destination;
+	int travelmode_choice <- rnd_choice([tram_choiceprob,(1-tram_choiceprob)]); //if 0, then chooses tram, if 1, then chooses bus
+//	unknown travelmode_choice <- rnd_choice(["tram_stop"::tram_choiceprob,"bus_stop"::(1.0-tram_choiceprob)]);
+//	int random_index;
+
+	reflex temporal_preferences when: cycle = 0 {
+		if fearfulness = 1 { //normal people
+			max_waiting_time <- ln(lognormal_rnd(mean_waiting_time/60,stdev_waiting_time/60));
+			write(sample(mean_waiting_time/60));
+			write(sample(max_waiting_time));
+//			max_waiting_time <- (mean_waiting_time + z1*stdev_waiting_time)/60;
+				if max_waiting_time < 1 {
+					max_waiting_time <- 1;
+				}
+		}
+		else { // for people who are more fearful
+			max_waiting_time <- rnd(min_max_waiting_time_fearful/60,max_max_waiting_time_fearful/60);
+		}
+
+	}
+	
+	reflex demographic_preference when: cycle = 0 {
+		if gender = 1 {
+			gender_pref <- rnd_choice([same_gender_only_acceptance_prob_female,(1-same_gender_only_acceptance_prob_female)]); //if 0, then prefers same gender, if 1, then no pref
+		}
+		else {
+			gender_pref <- rnd_choice([same_gender_only_acceptance_prob_male,(1-same_gender_only_acceptance_prob_male)]); //if 0, then prefers same gender, if 1, then no pref
+		}
+	}
+	
+	
+	reflex choose_destination when: cycle = 0 {
+		nearby_stops <- list(stopscsv) at_distance (ptstop_search_distance);
+//		write(sample(nearby_stops));
+		nearby_stops >>- nearby_stops select (each.type_index != travelmode_choice);
+		no_of_nearby_stops <- length(nearby_stops);
+		if no_of_nearby_stops > 1 { // choose randomly from any of the stops within the given threshold
+//			random_index <- rnd (no_of_nearby_stops);
+			mystop <- any(nearby_stops);// where each.type_index = travelmode_choice);
+//			random_index <- nearby_stops index_of mystop;
+			pt_destination <- mystop.location;
+			write(sample(self));
+			write(sample(no_of_nearby_stops));
+			write(sample(nearby_stops));
+			write(sample(mystop));
+			write "";
+		}
+		else { // if no stops within threshold, choose the nearest one
+			mystop <- list(stopscsv) closest_to(self);
+			pt_destination <- mystop.location;
+			write(sample(self));
+			write(sample(no_of_nearby_stops));
+			write(sample(nearby_stops));
+			write(sample(mystop));
+			write "";
+		}
+		if pt_destination != location {
+			shortest_path <- path_between (the_graph, location, pt_destination);
+			write(sample(shortest_path));
+			shortest_path_length <- shortest_path.shape.perimeter;
+		}
+		else {
+			shortest_path_length <- 0.0;
+		}
+	}
+	
+	reflex become_active when: start_walk = current_min and flag_matched = 0 { //updated 1.10.2020
+		flag_active <- 1;
+	}
+
+	reflex waiting when: flag_active = 1 and assigned_buddy = nil {
+		actual_waiting_time <- current_min - start_walk;
+	}
+
+	reflex give_up when: actual_waiting_time = max_waiting_time and assigned_buddy = nil {
+		flag_active <- 0;
+		flag_give_up <- 1;
+		modified_start_walk <- start_walk + actual_waiting_time;
+	}
+	
+	reflex move_alone when: flag_active = 0  and flag_give_up = 1 { // walk towards final destination alone if no matches found
+//		the_path <- goto (target: self.the_target, on: the_graph, return_path: true);
+		the_path <- goto (target: self.pt_destination, on: the_graph, return_path: true);
+		list<geometry> segments <- the_path.segments;
+		loop line over: segments {
+			total_dist <- total_dist + line.perimeter;
+			dist_alone <- dist_alone + line.perimeter;
+		}
+		
+		if (the_path != nil and the_path.shape != nil) {
+			list<point> pts <- (the_path.segments accumulate each.points);
+			if (first(pts) != last(pts)) {
+				my_path <-my_path = nil ? the_path.shape :union(my_path,the_path.shape);
+			}	
+		}		
+	}
+	
+	reflex move_with_buddy_from_origin when: shortest_path_length_to_buddy = 0.0 and modified_start_walk <= current_min and flag_matched = 1 {
+		flag_active <- 0;
+		trigger_walk <- 1; 
+		var0 <- self neighbors_at(0) collect each.name;
+		start_walk_share <- var0 contains assigned_buddy;
+	}
+	
+	reflex move_together when: trigger_walk = 1 and flag_reached_seppoint = 0 { // walk towards final destination after meeting
+		the_path_together <- goto (target: separation_point, on: the_graph, return_path: true);
+		list<geometry> segments <- the_path_together.segments;
+		loop line over: segments {
+			total_dist <- total_dist + line.perimeter;
+			dist_with_buddy <- dist_with_buddy + line.perimeter;
+		}
+		
+		if (the_path_together != nil and the_path_together.shape != nil) {
+			list<point> pts3 <- (the_path_together.segments accumulate each.points);
+			if (first(pts3) != last(pts3)) {
+				my_path_3 <-my_path_3 = nil ? the_path_together.shape :union(my_path_3,the_path_together.shape);
+			}	
+		}
+		if self.location = 	separation_point {
+			flag_reached_seppoint <- 1;
+		}	
+	}
+	
+	reflex move_from_seppoint_to_dest when: flag_diffdest = 1 and flag_reached_seppoint = 1 {
+		
+		the_path_after_separation <- goto (target: pt_destination, on: the_graph, return_path: true);
+		list<geometry> segments <- the_path_after_separation.segments;
+		loop line over: segments {
+			total_dist <- total_dist + line.perimeter;
+//			dist_alone <- dist_alone + line.perimeter; 
+			dist_after_separation <- dist_after_separation + line.perimeter; 
+		}
+		if (the_path_after_separation != nil and the_path_after_separation.shape != nil) {
+			list<point> pts4 <- (the_path_after_separation.segments accumulate each.points);
+			if (first(pts4) != last(pts4)) {
+				my_path_4 <-my_path_4 = nil ? the_path_after_separation.shape :union(my_path_4,the_path_after_separation.shape);
+			}	
+		}	
+	}
+	
+	reflex move_to_meet when: assigned_buddy != nil and (modified_start_walk <= current_min and trigger_walk = 0) and flag_matched = 1 {	// walk towards meeting point
+		flag_active <- 0;	 
+		the_path_to_meetingpoint <- goto (target: meeting_point, on: the_graph, return_path: true);	
+		list<geometry> segments <- the_path_to_meetingpoint.segments;
+		loop line over: segments {
+			total_dist <- total_dist + line.perimeter;
+//			dist_alone <- dist_alone + line.perimeter; 
+			dist_towards_buddy <- dist_towards_buddy + line.perimeter;
+		}	
+		if (the_path_to_meetingpoint != nil and the_path_to_meetingpoint.shape != nil) {
+			list<point> pts2 <- (the_path_to_meetingpoint.segments accumulate each.points);
+			if (first(pts2) != last(pts2)) {
+				my_path_2 <-my_path_2 = nil ? the_path_to_meetingpoint.shape :union(my_path_2,the_path_to_meetingpoint.shape);
+			}	
+		}
+		
+		var0 <- self neighbors_at(0) collect each.name;
+		start_walk_share <- var0 contains assigned_buddy;
+		if start_walk_share = true and self.location = meeting_point { // walk towards destination is triggerred only if both peds are at the meeting point
+			trigger_walk <- 1; // once it becomes 1, it always stays 1 even if start walk share is false		
+		}
+	}
+
+	reflex walk_end when: location = pt_destination and flag_reached = 0 {
+		end_walk <- current_min;
+		walk_duration <- (end_walk - modified_start_walk);
+		flag_reached <- 1;
+		nbpeople <- nbpeople - 1;
+		//do die;// returns: end_walk; // works for sim pausing, but cannot see info regarding valid pedestrians after death
+	}
+
+	aspect base {
+		if self.location != pt_destination {
+			if flag_active = 1 {
+				draw triangle(30) color: #orange border: #black;
+			}
+			else if flag_matched = 1 {
+				draw triangle(30) color: #green border: #black;
+			}
+			else if flag_give_up = 1 {
+				draw triangle(30) color: #red border: #black;
+			}
+			else {
+				draw triangle(30) color: rgb(#orange,5) border: #black;
+			}					
+		}
+		else{
+			draw triangle(30) color: rgb(#blue,5) border: #black;
+		}
+		draw my_path color: #red;
+		draw my_path_2 color: #blue;
+		draw my_path_3 color: #green;
+		draw my_path_4 color: #orange;
+	}
+
+}
+
+
+
+
+
+experiment batch_ped_traffic type: gui {
+	
+//	parameter "Shapefile for pedestrian network:" var: edges_shapefile category: "Input files" ;
+//	parameter "CSV file for PT stops data:" var: stops_csv category: "Input files" ;
+//	parameter "CSV file for population data:" var: population_input category: "Input files" ;
+//	parameter "Simulation number" var: sim_number category: "Model: General" ;
+
+	parameter "Day of the year 2019" var: doy category: "System" ;
+//	parameter "Hour of the day" var: hour category: "System" ;
+
+	parameter "Number of people" var: nbpeople_init category: "People: General" ;
+	parameter "Proportion of male agents" var: male_to_total_ratio category: "People: Demographics" min: 0.0 max: 1.0; 
+	parameter "Only same gender preffered probability for males" var: same_gender_only_acceptance_prob_male category: "People: Demographics" min: 0.0 max: 1.0; 
+	parameter "Only same gender preffered probability for females" var: same_gender_only_acceptance_prob_female category: "People: Demographics" min: 0.0 max: 1.0; 
+	
+	parameter "Employment ratio" var: employment_ratio category: "People: Demographics" min: 0.0 max: 1.0; 
+	
+//	parameter "PT stop search distance MEAN" var: mean_ptstop_search_distance category: "People: Thresholds"; // min: 0.0 #m max: 1000.0 #m;	
+//	parameter "PT stop search distance STDEV" var: stdev_ptstop_search_distance category: "People: Thresholds"; // min: 0.0 #m max: 1000.0 #m;
+	parameter "Euclidian distance threshold for matchmaking" var: distance_threshold category: "People: Thresholds"; // min: 0.0 #m max: 1000.0 #m;
+//	parameter "Maximum waiting time (absolute)" var: max_waiting_time_global category: "People: Thresholds" min: 0 #mn max: 15#mn ;
+//	parameter "Maximum waiting time (lower limit)" var: min_max_waiting_time category: "People: Thresholds" min: 0 #mn max: 10#mn;
+//	parameter "Maximum waiting time (upper limit)" var: max_max_waiting_time category: "People: Thresholds" min: 5 #mn max: 20#mn ;
+	
+	parameter "Mean walking speed" var: mean_speed category: "People" min: 3.0 #km/#h max: 4.5 #km/#h;
+	parameter "Standard deviation of walking speed" var: stdev_speed category: "People" min: 0.5 #km/#h max: 1.0 #km/#h;
+	parameter "Probability of tram as the travel mode" var: tram_choiceprob category: "People" min: 0.0 max: 1.0;
+	
+	// We create supplementary simulations using the species name 'parkvillewalkshare_dynamic_model' (automatically created from the name of the model + '_model')
+	init {
+		create parkvillewalkshare_dynamic_model with: [hour::19];
+		create parkvillewalkshare_dynamic_model with: [hour::20];
+		create parkvillewalkshare_dynamic_model with: [hour::21];
+		create parkvillewalkshare_dynamic_model with: [hour::22];
+		create parkvillewalkshare_dynamic_model with: [hour::23];
+		create parkvillewalkshare_dynamic_model with: [hour::0];
+		create parkvillewalkshare_dynamic_model with: [hour::1];
+		create parkvillewalkshare_dynamic_model with: [hour::2];
+
+	}
+		
+	output {
+
+		monitor 'DOY' value: doy;	
+		monitor 'Hour' value: hour;
+		monitor 'Number of people' value: nbpeople_init ;
+		monitor "Current minute" value: current_min refresh: every(1#cycle);
+		monitor "Number of users remaining" value: nbpeople refresh: every(1#cycle);		
+		monitor 'Number of users who have been matched' value: people count (each.flag_matched = 1);
+		monitor 'Matching rate(%)' value: (people count (each.flag_matched = 1)/nbpeople_init)*100;
+		
+	}
+}

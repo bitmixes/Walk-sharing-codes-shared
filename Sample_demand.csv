@@ -1,0 +1,11 @@
+;name;loc_orig;start_walk;travelmode_detailed;travelmode;walkshare_availing_likelihood
+3;people3;{1500,1800};40;walk_cab_publictransport;walk_cab_publictransport;3.2490154575356485
+13;people13;{1700,1600};41;bike;personal_vehicle;3.466944119651743
+19;people19;{1300,1800};42;walk_cab_publictransport;walk_cab_publictransport;4.040624280917225
+20;people20;{1400,2000};25;car;personal_vehicle;3.2391127175665035
+42;people42;{1400,1600};30;walk_cab_publictransport;walk_cab_publictransport;3.0081591484549954
+47;people47;{1300,2000};23;walk_cab_publictransport;walk_cab_publictransport;3.5083890271480698
+49;people49;{1300,2000};45;bike;personal_vehicle;3.7695540434079713
+52;people52;{1900,2000};14;walk_cab_publictransport;walk_cab_publictransport;3.8977777956022983
+55;people55;{1600,1900};22;walk_cab_publictransport;walk_cab_publictransport;4.5064103480054785
+56;people56;{1500,1800};17;bike;personal_vehicle;3.522047718216756
